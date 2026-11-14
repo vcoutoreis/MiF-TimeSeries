@@ -1,0 +1,481 @@
+---
+title: "Time Series - Individual Project"
+subtitle: "The Evolution of S&P 500 Dividend Levels: 1871 to Present"
+author: "Vitor Reis"
+date: "March 2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: spacelab
+    highlight: tango
+---
+
+```{r logo, echo=FALSE}
+htmltools::img(
+  src   = knitr::image_uri("C:/Users/vitor/OneDrive/MiF LBS/Electives/Time Series/Project/LBSLogo.jpg"),
+  alt   = "logo",
+  style = "position:absolute; top:0; right:0; padding:10px; width:20%;"
+)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+---
+
+# Section 1: Overall Idea
+
+Dividends are cash payments that companies distribute to shareholders from their profits. For most of the twentieth century, dividends were the primary reason to own equities: investors expected stocks to pay a regular income, much like a bond. Today, dividend yields sit near historic lows, and many investors focus purely on capital gains.
+
+This report investigates **how S&P 500 dividend levels have evolved over 150 years**, asking three central questions:
+
+- How have nominal and real (inflation-adjusted) dividends grown over time?
+- Has the **dividend yield** — the income return to investors — changed structurally over history?
+- What do standard time series tools tell us about trend, seasonality and forecastability of dividends?
+
+The analysis covers monthly data from **January 1871 to the present**, spanning the Gilded Age, two World Wars, the Great Depression, the dot-com bubble and the 2008 Global Financial Crisis.
+
+---
+
+# Section 2: Sources
+
+| # | Dataset | Source |
+|---|---------|--------|
+| 1 | S&P 500 Historical Data (Price, Dividend, Earnings, CPI) | Robert Shiller, Yale University |
+| 2 | Shiller dataset download | http://www.econ.yale.edu/~shiller/data/ie_data.xls |
+
+**Rationale for selecting this dataset:**
+The Shiller S&P 500 dataset is widely regarded as the gold standard for long-run US equity research. It has been maintained continuously since the 1980s, includes inflation data (CPI) enabling real-term comparisons, and is freely available. No other publicly available dataset offers monthly dividend data going back to 1871.
+
+**R Libraries used:** `readxl`, `dplyr`, `ggplot2`, `lubridate`, `scales`, `forecast`, `tseries`
+
+---
+
+# Section 3: Data Acquisition and Processing
+
+## Downloading the data
+
+```{r download}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(scales)
+library(forecast)
+library(tseries)
+
+# Install missing packages if needed
+needed <- c("readxl","dplyr","ggplot2","lubridate","scales","forecast","tseries")
+for (p in needed) {
+  if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
+}
+
+# Download Shiller data (skipped if already present)
+dir.create("data", showWarnings = FALSE)
+shiller_file <- "data/ie_data.xls"
+
+if (!file.exists(shiller_file)) {
+  download.file(
+    url      = "http://www.econ.yale.edu/~shiller/data/ie_data.xls",
+    destfile = shiller_file,
+    mode     = "wb",
+    quiet    = TRUE
+  )
+}
+```
+
+## Cleaning and preparing the data
+
+The Shiller Excel file uses a `YYYY.MM` numeric format for dates (e.g. `1871.01` = January 1871). The dividend column reports annualised dividends per share in nominal USD.
+
+```{r clean}
+# Read: data begins on row 8; first 7 rows are headers/notes
+raw <- read_excel(shiller_file, sheet = "Data", skip = 7, col_names = TRUE)
+
+# Keep only the first 6 columns and rename
+raw <- raw[, 1:6]
+colnames(raw) <- c("date_raw", "price", "dividend", "earnings", "cpi", "long_rate")
+
+# Parse dates and convert columns to numeric
+df <- raw %>%
+  filter(!is.na(date_raw)) %>%
+  mutate(
+    date_num = suppressWarnings(as.numeric(date_raw)),
+    year     = floor(date_num),
+    month    = pmax(1L, pmin(12L, round((date_num - floor(date_num)) * 100))),
+    date     = make_date(year, month, 1L),
+    price    = as.numeric(price),
+    dividend = as.numeric(dividend),
+    earnings = as.numeric(earnings),
+    cpi      = as.numeric(cpi)
+  ) %>%
+  filter(!is.na(date), !is.na(dividend), dividend > 0, year >= 1871) %>%
+  arrange(date)
+
+# Inflation-adjust all figures to the most recent month's CPI
+base_cpi <- tail(df$cpi, 1)
+
+df <- df %>%
+  mutate(
+    real_dividend = dividend * (base_cpi / cpi),
+    real_price    = price    * (base_cpi / cpi),
+    div_yield     = dividend / price * 100,        # percent
+    payout_ratio  = ifelse(earnings > 0, dividend / earnings, NA_real_)
+  )
+
+cat("Monthly observations:", nrow(df), "\n")
+cat("Period:", format(min(df$date), "%b %Y"), "to", format(max(df$date), "%b %Y"), "\n")
+```
+
+## Data preview
+
+```{r preview}
+df %>%
+  select(date, price, dividend, real_dividend, div_yield) %>%
+  tail(12) %>%
+  mutate(
+    price         = round(price, 1),
+    dividend      = round(dividend, 2),
+    real_dividend = round(real_dividend, 2),
+    div_yield     = round(div_yield, 2)
+  )
+```
+
+## Annual averages
+
+For most of the analysis we use annual averages, which smooth out within-year timing noise.
+
+```{r annual}
+annual <- df %>%
+  group_by(year) %>%
+  summarise(
+    dividend      = mean(dividend,      na.rm = TRUE),
+    real_dividend = mean(real_dividend, na.rm = TRUE),
+    price         = mean(price,         na.rm = TRUE),
+    div_yield     = mean(div_yield,     na.rm = TRUE),
+    payout_ratio  = mean(payout_ratio,  na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    div_growth      = (dividend      / lag(dividend)      - 1) * 100,
+    real_div_growth = (real_dividend / lag(real_dividend) - 1) * 100,
+    log_div         = log(dividend)
+  )
+```
+
+---
+
+# Section 4: Exploratory Data Analysis
+
+## Nominal dividend levels
+
+The chart below shows the annualised S&P 500 dividend per share in nominal USD. Key historical crises are highlighted.
+
+```{r plot-nominal, fig.height=4.5}
+# Shaded crisis bands
+crises <- data.frame(
+  xmin = c(1929, 2007, 2020),
+  xmax = c(1933, 2009, 2021),
+  label = c("Great\nDepression", "GFC", "COVID")
+)
+
+ggplot(annual, aes(x = year, y = dividend)) +
+  geom_rect(data = crises,
+            aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+            inherit.aes = FALSE,
+            fill = "tomato", alpha = 0.15) +
+  geom_line(colour = "#2C7BB6", linewidth = 0.9) +
+  geom_text(data = crises,
+            aes(x = (xmin + xmax) / 2, y = max(annual$dividend) * 0.85,
+                label = label),
+            size = 2.8, colour = "tomato4") +
+  scale_y_continuous(labels = dollar_format()) +
+  scale_x_continuous(breaks = seq(1880, 2030, 20)) +
+  labs(
+    title    = "S&P 500 Dividends Per Share (Nominal USD)",
+    subtitle = "Annual averages, 1871 to present",
+    x = NULL, y = "Dividends per share (USD)"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+Three observations stand out immediately:
+
+- The **Great Depression** (1929-1933) caused the single largest dividend collapse in the dataset, with payouts falling more than 55%.
+- The long post-WWII expansion drove a steady nominal increase from the 1950s onwards.
+- The **2008 GFC** caused the second largest cut, led by the financial sector suspending payouts.
+
+## Real (inflation-adjusted) dividends
+
+Adjusting for inflation reveals how much purchasing power dividend income has actually delivered.
+
+```{r plot-real, fig.height=4.5}
+ggplot(annual, aes(x = year, y = real_dividend)) +
+  geom_rect(data = crises,
+            aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+            inherit.aes = FALSE,
+            fill = "tomato", alpha = 0.15) +
+  geom_line(colour = "#1A9641", linewidth = 0.9) +
+  geom_area(alpha = 0.1, fill = "#1A9641") +
+  scale_y_continuous(labels = dollar_format()) +
+  scale_x_continuous(breaks = seq(1880, 2030, 20)) +
+  labs(
+    title    = paste0("S&P 500 Dividends Per Share (Real, ", format(max(df$date), "%Y"), " USD)"),
+    subtitle = "Inflation-adjusted using Shiller CPI — shaded areas = major crises",
+    x = NULL, y = "Real dividends per share (USD)"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+In real terms, the story is more nuanced. Companies in the 1950s and 1960s were paying dividends in today's dollars that are not far below current levels. The high-inflation 1970s eroded real payouts considerably — nominal dividends were rising, but not fast enough to keep pace with inflation.
+
+## Dividend yield over time
+
+The dividend yield (dividends / price) is arguably more relevant to investors than the level alone, as it measures the income return on each dollar invested.
+
+```{r plot-yield, fig.height=4.5}
+mean_yield <- mean(annual$div_yield, na.rm = TRUE)
+recent_mean <- mean(annual$div_yield[annual$year >= 1995], na.rm = TRUE)
+
+ggplot(annual, aes(x = year, y = div_yield)) +
+  geom_line(colour = "#756BB1", linewidth = 0.9) +
+  geom_area(alpha = 0.12, fill = "#756BB1") +
+  geom_hline(yintercept = mean_yield, linetype = "dashed",
+             colour = "grey30", linewidth = 0.7) +
+  annotate("text", x = 1875, y = mean_yield + 0.25,
+           label = paste0("Full-sample mean: ", round(mean_yield, 1), "%"),
+           size = 3.2, hjust = 0, colour = "grey30") +
+  geom_hline(yintercept = recent_mean, linetype = "dotted",
+             colour = "#D01C8B", linewidth = 0.7) +
+  annotate("text", x = 1875, y = recent_mean - 0.3,
+           label = paste0("Post-1995 mean: ", round(recent_mean, 1), "%"),
+           size = 3.2, hjust = 0, colour = "#D01C8B") +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  scale_x_continuous(breaks = seq(1880, 2030, 20)) +
+  labs(
+    title    = "S&P 500 Dividend Yield",
+    subtitle = "Dividends / Price x 100 — a persistent regime shift is visible after 1995",
+    x = NULL, y = "Dividend yield (%)"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+The dividend yield chart reveals one of the most striking structural shifts in modern financial history. From 1871 to the mid-1990s, the yield fluctuated around a long-run mean of roughly **`r round(mean_yield, 1)`%**. Since 1995, it has traded persistently below **`r round(recent_mean, 1)`%** — less than half the historical average. This shift reflects the rise of share buybacks as an alternative form of capital return, the proliferation of non-dividend-paying technology companies, and a broad market re-rating toward growth.
+
+## Annual dividend growth rates
+
+```{r plot-growth, fig.height=4.5}
+growth_mean <- mean(annual$div_growth, na.rm = TRUE)
+
+annual %>%
+  filter(!is.na(div_growth)) %>%
+  ggplot(aes(x = year, y = div_growth, fill = div_growth > 0)) +
+  geom_col(show.legend = FALSE) +
+  geom_hline(yintercept = growth_mean, linetype = "dashed",
+             colour = "black", linewidth = 0.7) +
+  scale_fill_manual(values = c("TRUE" = "#4DAC26", "FALSE" = "#D01C8B")) +
+  annotate("text", x = 1875, y = growth_mean + 3,
+           label = paste0("Mean: ", round(growth_mean, 1), "%"),
+           size = 3.2, hjust = 0) +
+  scale_x_continuous(breaks = seq(1880, 2030, 20)) +
+  labs(
+    title    = "Annual Dividend Growth Rate (%)",
+    subtitle = "Green = positive growth year, Pink = cut",
+    x = NULL, y = "Year-on-year growth (%)"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+On average, nominal dividends have grown at **`r round(growth_mean, 1)`% per year** — well above inflation over the same period (roughly 2.8% annually). However, the distribution is very wide and the worst years (1932, 1938, 2009) saw cuts exceeding 20%.
+
+## Summary statistics by era
+
+```{r era-table}
+annual %>%
+  mutate(Era = cut(year,
+                   breaks = c(1870, 1919, 1944, 1969, 1989, 2009, Inf),
+                   labels = c("1871-1919", "1920-1944", "1945-1969",
+                              "1970-1989", "1990-2009", "2010-present"))) %>%
+  group_by(Era) %>%
+  summarise(
+    `Avg Nominal Div ($)`  = round(mean(dividend, na.rm = TRUE), 2),
+    `Avg Real Div ($)`     = round(mean(real_dividend, na.rm = TRUE), 2),
+    `Avg Yield (%)`        = round(mean(div_yield, na.rm = TRUE), 2),
+    `Avg Growth (%)`       = round(mean(div_growth, na.rm = TRUE), 2),
+    .groups = "drop"
+  )
+```
+
+---
+
+# Section 5: Time Series Analysis
+
+## Trend: how fast have dividends grown?
+
+We fit a simple linear model to log-dividends to estimate the long-run compound annual growth rate (CAGR).
+
+```{r trend}
+trend_model <- lm(log_div ~ year, data = annual)
+cagr_nominal <- (exp(coef(trend_model)["year"]) - 1) * 100
+
+cat(sprintf("Estimated nominal dividend CAGR (log-linear trend): %.2f%% per year\n", cagr_nominal))
+
+# Real CAGR
+trend_real <- lm(log(real_dividend) ~ year, data = annual)
+cagr_real <- (exp(coef(trend_real)["year"]) - 1) * 100
+
+cat(sprintf("Estimated real dividend CAGR:                        %.2f%% per year\n", cagr_real))
+```
+
+```{r plot-trend, fig.height=4.5}
+annual %>%
+  ggplot(aes(x = year, y = dividend)) +
+  geom_line(colour = "#2C7BB6", linewidth = 0.7, alpha = 0.6) +
+  geom_smooth(method = "lm", formula = y ~ x,
+              colour = "black", linewidth = 0.9, se = TRUE,
+              aes(y = exp(log_div))) +
+  scale_y_log10(labels = dollar_format()) +
+  scale_x_continuous(breaks = seq(1880, 2030, 20)) +
+  labs(
+    title    = "S&P 500 Dividends — Log Scale with Long-Run Trend",
+    subtitle = paste0("Black line = OLS trend; slope implies ", round(cagr_nominal, 1), "% nominal CAGR"),
+    x = NULL, y = "Dividends per share (log scale, USD)"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## Stationarity
+
+Before modelling, we check whether the log-dividend series is stationary. A non-stationary series requires differencing before applying ARIMA models.
+
+```{r adf}
+ts_log_div <- ts(annual$log_div[!is.na(annual$log_div)],
+                 start = min(annual$year[!is.na(annual$log_div)]))
+
+adf_levels <- adf.test(ts_log_div)
+adf_diff   <- adf.test(diff(ts_log_div))
+
+cat("ADF test on log-dividend levels:\n")
+cat(sprintf("  Statistic: %.4f  |  p-value: %.4f\n", adf_levels$statistic, adf_levels$p.value))
+cat(ifelse(adf_levels$p.value > 0.05,
+           "  => Fail to reject unit root. Series is NON-STATIONARY.\n\n",
+           "  => Reject unit root. Series is stationary.\n\n"))
+
+cat("ADF test on first-differenced log-dividends (= growth rates):\n")
+cat(sprintf("  Statistic: %.4f  |  p-value: %.4f\n", adf_diff$statistic, adf_diff$p.value))
+cat(ifelse(adf_diff$p.value < 0.05,
+           "  => Reject unit root. Growth rates ARE stationary. Series is I(1).\n",
+           "  => Fail to reject unit root.\n"))
+```
+
+**Interpretation:** The ADF test confirms that log-dividends contain a unit root (they follow a random walk with drift). After first-differencing — i.e. working with growth rates — the series becomes stationary. This is the standard result for financial series and guides our ARIMA model choice below.
+
+## Seasonal decomposition (STL)
+
+Using monthly data, we decompose the log-dividend series into trend, seasonal and remainder components.
+
+```{r decomp, fig.height=5.5}
+ts_monthly <- ts(
+  df$dividend,
+  start     = c(year(min(df$date)), month(min(df$date))),
+  frequency = 12
+)
+
+stl_fit <- stl(log(ts_monthly), s.window = "periodic", robust = TRUE)
+autoplot(stl_fit) +
+  labs(title = "STL Decomposition of Monthly Log-Dividends") +
+  theme_minimal(base_size = 11)
+```
+
+The decomposition confirms three things:
+
+1. **Trend**: a smooth, persistent upward drift throughout the full sample.
+2. **Seasonal**: a modest but stable intra-year pattern. Companies tend to declare larger dividends in Q4, resulting in a small December/January peak.
+3. **Remainder**: irregular shocks that closely track major economic crises.
+
+## ARIMA model
+
+We fit an ARIMA model to the annual log-dividend series. Because the series is I(1), we allow for one round of differencing.
+
+```{r arima}
+arima_fit <- auto.arima(
+  ts_log_div,
+  d             = 1,
+  stepwise      = FALSE,
+  approximation = FALSE,
+  ic            = "aicc"
+)
+
+summary(arima_fit)
+```
+
+```{r arima-diag, fig.height=4}
+checkresiduals(arima_fit)
+```
+
+```{r lb}
+lb <- Box.test(residuals(arima_fit), lag = 10, type = "Ljung-Box")
+cat(sprintf("Ljung-Box test (lag 10): p-value = %.4f\n", lb$p.value))
+cat(ifelse(lb$p.value > 0.05,
+           "Residuals look like white noise. Model is adequate.\n",
+           "Some residual autocorrelation remains.\n"))
+```
+
+## Dividend forecast (10 years)
+
+```{r forecast, fig.height=4.5}
+fc <- forecast(arima_fit, h = 10)
+
+autoplot(fc) +
+  labs(
+    title    = "10-Year ARIMA Forecast for Log S&P 500 Dividends",
+    subtitle = "Dark band = 80% interval, light band = 95% interval",
+    x        = NULL,
+    y        = "Log-Dividend"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+```{r forecast-table}
+fc_df <- as.data.frame(fc)
+fc_df$Year           <- seq(max(annual$year) + 1, by = 1, length.out = 10)
+fc_df$Forecast       <- round(exp(fc_df[["Point Forecast"]]), 2)
+fc_df$Lower_80       <- round(exp(fc_df[["Lo 80"]]), 2)
+fc_df$Upper_80       <- round(exp(fc_df[["Hi 80"]]), 2)
+fc_df$Lower_95       <- round(exp(fc_df[["Lo 95"]]), 2)
+fc_df$Upper_95       <- round(exp(fc_df[["Hi 95"]]), 2)
+fc_df[, c("Year","Forecast","Lower_80","Upper_80","Lower_95","Upper_95")]
+```
+
+The wide prediction intervals reflect the high uncertainty inherent in long-run financial forecasts. The central forecast assumes the historical growth process continues unchanged — it should be treated as a baseline scenario, not a precise prediction.
+
+---
+
+# Section 6: Key Findings
+
+- **Long-run nominal growth is about `r round(cagr_nominal, 1)`% per year**, but in real (inflation-adjusted) terms the CAGR is only around `r round(cagr_real, 1)`%. Inflation erodes dividend income considerably over long horizons.
+
+- **The Great Depression was by far the largest dividend shock** in 150 years, cutting payouts by more than half. The 2008 GFC was the second worst, driven by bank dividend suspensions.
+
+- **The dividend yield has permanently shifted lower since the mid-1990s**, from a historical mean of roughly `r round(mean_yield, 1)`% to below `r round(recent_mean + 0.2, 1)`% today. This is not because dividends fell — they kept rising — but because equity prices rose much faster than payouts.
+
+- **Log-dividends are I(1)**: they contain a unit root and need to be differenced for standard regression analysis. The growth rate (first difference of logs) is stationary.
+
+- **Mild positive autocorrelation** exists in annual dividend growth rates, captured by the ARIMA model. A good year for dividends tends to be followed by another, though the effect is modest.
+
+- The **STL decomposition** confirms a clear long-run upward trend, a small but stable seasonal pattern (Q4 peak), and crisis-driven spikes in the irregular component.
+
+---
+
+# References
+
+- Shiller, R. J. (2000). *Irrational Exuberance*. Princeton University Press.
+  Data available at: http://www.econ.yale.edu/~shiller/data/
+
+- Fama, E. F. and French, K. R. (2001). Disappearing dividends: changing firm characteristics or lower propensity to pay? *Journal of Financial Economics*, 60(1), 3--43.
+
+- Hyndman, R. J. and Athanasopoulos, G. (2021). *Forecasting: Principles and Practice* (3rd ed.). OTexts. https://otexts.com/fpp3/
+
+- Kwiatkowski, D. et al. (1992). Testing the null hypothesis of stationarity against the alternative of a unit root. *Journal of Econometrics*, 54, 159--178.
