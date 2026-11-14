@@ -1,0 +1,220 @@
+---
+title: "Time Series - Group 2 Assignment" 
+subtitle: "Evolution of the Top 10 companies in the S&P 500 index" 
+author: "Rene Vera, Felipe Brealey, Vitor Reis, Marco Rodriguez" 
+date: "2026-03-17"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: spacelab 
+    highlight: tango
+---
+
+```{r, echo=FALSE}
+# This code will display the LBS logo at the top right of the page
+# Do not change this code
+htmltools::img(src = knitr::image_uri("images/LBSLogo.png"),
+               alt = 'logo',
+               style = 'position:absolute; top:0; right:0; padding:10px; width:20%;')
+```
+
+### **Overall Idea**
+
+The S&P 500 is an index that tracks the performance of the 500 largest publicly traded companies in the US market, which account for roughly 80% of the total US equity market value.
+
+The index is weighted by the market capitalizations of its constituents. Hence, companies with larger market value might have a greater impact on the index performance.
+
+Therefore, in this document we review the evolution of the top 10 companies in the S&P 500 from 1989 to 2025, to study how it has evolved through time and if there are some predominant sectors. Specifically, we illustrate the structural evolution of the US stock market, highlighting the contraction of the manufacturing and industrial sectors alongside the rapid expansion of the information technology sector.
+
+### **S&P Constitution & Maintenance**
+
+> 1) How the Index Constituted
+
+The S&P 500 is managed by a group called the Index Committee. They are resposible to pick, and also actively manage the list through a few key processes:
+
+- Eligibility Rules: To get in, a company must be U.S.-based, have a large market value (usually above $15 billion), and—crucially—must have been profitable over the last four quarters.
+
+- Quarterly Rebalancing: Four times a year (March, June, September, and December), the committee reviews the list. If a company has shrunk too much or gone bankrupt, it’s kicked out. If a new star (like a tech giant) has grown enough, it’s invited in.
+
+- Corporate Actions: If two companies in the index merge, or if one is bought out, the committee has to find a replacement immediately to keep the count at 500.
+
+> 2) How the Weights are Attributed
+
+The S&P 500 uses a method called Float-Adjusted Market Cap Weighting - meaning, the bigger the company, the more influence it has on the index's price. 
+
+*Weight Calculation*
+
+1 - Market Cap: First, they calculate the company's total value (Share Price x times x Number of Shares).
+
+2 - The "Float": They only count shares that are available to the public to trade. They ignore shares held by founders or governments that aren't for sale.
+
+3 - Proportional Impact: A company’s influence on the index is a direct reflection of its size relative to the whole group. If a company accounts for 5% of the total market value of all 500 firms, its individual performance dictates exactly 5% of the index's total daily movement. This ensures that the larger a company’s "slice" of the total pie, the more its price changes pull the entire index up or down, making the biggest players the true drivers of the final score.
+
+
+### **Sources**
+
+1)  Companies Data: Bloomberg
+2)  Companies Data: <https://www.kaggle.com/datasets/juanmerinobermejo/s-and-p-500-top-20-companies-by-market-cap-from-1989>
+3)  Inflation: Economic Data (FRED)
+4)  Inflation: US Bureau of Labor Statistics (BLS)
+
+### **Rationale for Selecting Dataset**
+
+1)  Companies Data: We chose the Kaggle dataset because it provides a longer historical timeframe than Bloomberg (dating back to 1989 rather than 1990). Besides that, we deciced to use exclusively Kaggle to maintain data consistency and avoid discrepancies that can have shown from mixing different datasets.
+2)  Inflation Data: We sourced our inflation metrics directly from official government databases to ensure the integrity and reliability of our financial adjustments.
+
+### **Visualizations Considered**
+
+We decided to create bar charts displaying the top 10 S&P 500 companies by largest market capitalization for each year.
+
+### **R Libraries Used**
+
+jpeg, gifski
+
+### **Description of the Visualization**
+
+The visualization tracks the market capitalizations of the 10 largest companies in the S&P 500 from 1989 to the present.
+
+### **Data Processing**
+
+
+1)  **Kaggle Dataset (Ticker Standardization):** During data cleaning, we found inconsistencies in the dataset's ticker column. Some entries used tickers from international exchanges (e.g., the London or Hong Kong Stock Exchanges), while others reflected outdated historical tickers for companies that had since changed their symbols. Because our visualization script programmatically fetches company logos using their active US ticker, we needed a single, standardized identifier for each firm. We resolved this by manually identifying and assigning the current, unique US exchange ticker for all companies missing the ticker.
+2)  **Inflation Adjustment:** All financial figures are adjusted to 2025 USD. We sourced inflation data from 1960 to 2023 from the Federal Reserve Economic Data (FRED) database. For 2024, we calculated the rate using the US Bureau of Labor Statistics (BLS) CPI calculator.
+3)  **Companies Sector:** We manually researched the industry classification for each company - after removing duplicates, we had about 37 unique companies and which we manually mapped into our Excel dataset.
+
+
+### **Allocation of tasks**
+
+Initially, all team members brainstormed potential project concepts. We then presented these ideas to the professor to determine the most suitable topic, ultimately selecting the evolution of the US stock market. Next, we divided the work of sourcing datasets. Vitor initially explored data extraction through Bloomberg; however, Marco subsequently located a dataset on Kaggle that was more accessible and easier to process. Finally, the team divided the remaining tasks between cleaning the data, creating the plots and GIF, and compiling the findings into the final RMD file.
+
+### **Code**
+
+Reading the database
+
+```{r Reading Database}
+database = "data/sp500rev.csv"
+Top10MktCap <- read.csv(database)
+```
+
+Parameters and needed vectors
+
+```{r Parameters, needed vectors, and data cleaning}
+
+maxCap <- max(Top10MktCap$MarketCap_BillionsUSD.as.dollar.2025) 
+
+years <- unique(Top10MktCap$Year)                               
+
+sectors <- unique(Top10MktCap$Sector)                           
+```
+
+Ticker management and logo fetching
+
+```{r Ticker management}
+Top10MktCap$Ticker[Top10MktCap$Company == "INTEL CORPORATION"] <- "INTC"
+Top10MktCap$Ticker[Top10MktCap$Company == "ALPHABET INC."] <- "GOOGL"
+Top10MktCap$Ticker[Top10MktCap$Company == "MICROSOFT CORPORATION"] <- "MSFT"
+Top10MktCap$Ticker[Top10MktCap$Company == "RTX CORPORATION"] <- "RTX"
+
+tickers <- unique(Top10MktCap$Ticker)
+
+key = "pk_KEw7E5RTTuKOnOLpSldxBA"
+urls <- paste0("https://img.logo.dev/ticker/", tickers, "?token=", key)
+dir.create("logos", showWarnings = FALSE)
+for(i in seq_along(urls)) {
+  
+  dest <- paste0("logos/", tickers[i], ".png")
+  
+  status <- try(
+    download.file(urls[i], destfile = dest, mode = "wb", quiet = TRUE, method = "libcurl"),
+    silent = TRUE
+  )
+  
+  if(inherits(status, "try-error")) {
+    message("Download failed: ", tickers[i])
+  }
+  
+  Sys.sleep(0.2)
+}
+logo_map <- setNames(paste0(tickers, ".png"), unique(Top10MktCap$Company))
+library(jpeg)
+logos <- lapply(logo_map, function(f) {
+  readJPEG(paste0("logos/", f))
+})
+
+```
+
+Assigning colors to each sector
+
+```{r Assigning colors to each sector}
+colors <- setNames(c("#EE3B3B",
+                     "#436EEE",
+                     "#66CD00",
+                     "#5D478B",
+                     "#EEAEEE",
+                     "#EEC900",
+                     "#FF7F24",
+                     "#8EE5EE",
+                     "#A0522D",
+                     "#F0FFF0"), sectors)                       
+```
+
+Plots and GIF creation
+
+```{r Plots and gif, }
+png("output/frame%03d.png", width = 1000, height = 700)
+for (yr in years) {
+  
+  par(mar = c(5, 20, 4, 2))
+  x <- Top10MktCap[Top10MktCap$Year == yr, ]
+  
+  # keep top 10
+  x <- x[order(x$MarketCap_BillionsUSD.as.dollar.2025), ]
+  x <- tail(x, 10)
+  
+  bp <- barplot(x$MarketCap_BillionsUSD.as.dollar.2025,
+                names.arg = x$Company,
+                main = paste("Top 10 companies in the S&P 500 by market capitalization\n", yr),
+                xlab = "Market Capitalization (Inflation adj. - USD Billions)",
+                las = 1,
+                cex.names = 1,
+                cex.axis = 1,
+                col = colors[x$Sector],
+                horiz = TRUE,
+                xlim = c(-maxCap * 0.2, maxCap*1.1),
+                cex.main = 1.5)
+  
+  legend("bottomright",
+         legend = names(colors),
+         fill = colors,
+         title = "Sector",
+         bty = "n",
+         cex = 1.2)
+  
+  text(x = x$MarketCap_BillionsUSD.as.dollar.2025,
+       y = bp,
+       labels = round(x$MarketCap_BillionsUSD.as.dollar.2025,1),
+       pos = 4,
+       cex = 1)
+  for(i in seq_along(x$Company)) {
+    
+    # logo
+    rasterImage(logos[[x$Company[i]]],
+                xleft  = -maxCap * 0.18,
+                xright = -maxCap * 0.10,
+                ybottom = bp[i] - 0.3,
+                ytop    = bp[i] + 0.3)
+
+  }
+}
+dev.off()
+
+png_files <- list.files("output", pattern = "frame.*png", full.names = TRUE)
+
+gifski::gifski(png_files, "output/race.gif", delay = 0.6)
+
+```
+
+<center>
+![](output/race.gif){width="50%"}
+</center>
